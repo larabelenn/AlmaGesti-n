@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión de Almacén</title>
+    
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+
+    <style>
+        /* La última celda de cada fila (la de acciones) va a ser el 'padre' del menú flotante. */
+        td:last-child { position: relative; width: 3rem; overflow: visible; }
+        
+        /* El div que contiene el menú, lo uso para centrar los 3 puntitos. */
+        .acciones-menu { display: flex; justify-content: center; align-items: center; height: 100%; }
+
+        /* Estilos para los 3 puntitos (la etiqueta 'summary'). */
+        .acciones-menu summary {
+            background: transparent; border: none; /* Le saco el fondo y el borde. */
+            padding: 0; margin: 0;
+            font-size: 1.5rem;   /* Los hago más grandes. */
+            line-height: 0;      /* Ayuda a centrarlo verticalmente. */
+            color: var(--secondary); /* Un color gris que viene de Pico.css. */
+            font-weight: bold;
+            cursor: pointer; /* Para que aparezca la manito al pasar por encima. */
+        }
+        .acciones-menu summary::after { display: none; } /* Le saco la flechita que viene por defecto. */
+        .acciones-menu details[open] > summary { color: var(--primary); } /* Se pone azul cuando el menú está abierto. */
+
+        /* Estilos para el menú que se despliega (la lista 'ul'). */
+        .acciones-menu ul {
+            position: absolute; /* ¡La clave! Hace que el menú "flote" por encima de todo. */
+            right: 2rem;        /* Lo pego a la derecha. */
+            z-index: 100;       /* Me aseguro que esté por encima de cualquier otra cosa. */
+            width: max-content; /* El ancho se ajusta al texto que tenga adentro. */
+            background: var(--card-background-color);
+            border: 1px solid var(--pico-muted-border-color);
+            box-shadow: 0 0.125rem 1rem rgba(0,0,0,0.1); /* Le doy una sombrita para que parezca que flota. */
+        }
+    </style>
+</head>
+<body>
+    <main class="container">
+        <h1 style="text-align: center;">Sistema de Gestión de Almacén</h1>
+
+        <nav>
+            <ul>
+                <li><input type="search" id="buscador" name="search" placeholder="Buscar por nombre o SKU..."></li>
+            </ul>
+            <ul>
+                <li><button id="btn-abrir-modal-crear">➕ Agregar Nuevo Producto</button></li>
+            </ul>
+        </nav>
+
+        <figure>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>Nombre</th><th>SKU</th><th>Cantidad</th>
+                        <th aria-label="Acciones"></th> 
+                    </tr>
+                </thead>
+                <tbody id="tabla-productos">
+                    {% for producto in productos %}
+                    <tr id="producto-{{ producto.id }}">
+                        <td>{{ producto.id }}</td>
+                        <td>{{ producto.nombre }}</td>
+                        <td>{{ producto.sku }}</td>
+                        <td>{{ producto.cantidad }}</td>
+                        <td>
+                            <div class="acciones-menu">
+                                <details role="list" dir="rtl">
+                                    <summary aria-haspopup="listbox" role="button">...</summary>
+                                    <ul role="listbox">
+                                        <li><a href="#" class="link-editar" 
+                                            data-id="{{ producto.id }}" data-nombre="{{ producto.nombre }}"
+                                            data-sku="{{ producto.sku }}" data-cantidad="{{ producto.cantidad }}">Editar</a></li>
+                                        <li><a href="#" class="link-eliminar" data-id="{{ producto.id }}">Eliminar</a></li>
+                                    </ul>
+                                </details>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </figure>
+    </main>
+
+    <dialog id="modal-formulario">
+        <article>
+            <header>
+                <a href="#close" aria-label="Close" class="close" id="btn-cerrar-modal"></a>
+                <strong id="modal-titulo"></strong>
+            </header>
+            <form id="form-producto">
+                <input type="hidden" id="producto-id" name="id">
+                <label for="nombre">Nombre del producto</label>
+                <input type="text" id="nombre" name="nombre" required>
+                <label for="sku">SKU (Código único)</label>
+                <input type="text" id="sku" name="sku" required>
+                <label for="cantidad">Cantidad</label>
+                <input type="number" id="cantidad" name="cantidad" min="0" required>
+                <footer style="text-align: right;">
+                    <button type="button" class="secondary" id="btn-cancelar">Cancelar</button>
+                    <button type="submit">Guardar</button>
+                </footer>
+            </form>
+        </article>
+    </dialog>
+
+    <script>
+    // 'DOMContentLoaded' es un evento que se asegura de que todo el HTML se haya cargado antes de intentar ejecutar este script.
+    document.addEventListener('DOMContentLoaded', () => {
+        
+        // Conecto mi página con el servidor de Python para la comunicación en tiempo real.
+        const socket = io();
+
+        // Guardo en variables todos los elementos del HTML que voy a necesitar manipular.
+        const modal = document.getElementById('modal-formulario');
+        const form = document.getElementById('form-producto');
+        const modalTitulo = document.getElementById('modal-titulo');
+        const productoIdInput = document.getElementById('producto-id');
+        const btnAbrirModalCrear = document.getElementById('btn-abrir-modal-crear');
+        const btnCancelar = document.getElementById('btn-cancelar');
+        const btnCerrarModal = modal.querySelector('.close');
+        const tablaBody = document.getElementById('tabla-productos');
+        const buscador = document.getElementById('buscador');
+
+        // Creo funciones cortas para abrir y cerrar el modal, así no repito código.
+        const abrirModal = () => modal.showModal();
+        const cerrarModal = () => modal.close();
+
+        // Esta función es la más importante de la interfaz: le da vida a los botones de "Editar" y "Eliminar".
+        const asignarEventos = () => {
+            // Busco todos los links de "Editar" que haya en la página.
+            document.querySelectorAll('.link-editar').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault(); // Esto evita que el link recargue la página.
+                    const data = e.currentTarget.dataset; // 'dataset' me da acceso a todos los atributos 'data-*' que guardé en el HTML.
+                    modalTitulo.textContent = 'Editar Producto'; // Le pongo el título correcto al modal.
+                    // Relleno el formulario con los datos del producto en el que hice clic.
+                    productoIdInput.value = data.id;
+                    document.getElementById('nombre').value = data.nombre;
+                    document.getElementById('sku').value = data.sku;
+                    document.getElementById('cantidad').value = data.cantidad;
+                    abrirModal();
+                });
+            });
+            // Busco todos los links de "Eliminar".
+            document.querySelectorAll('.link-eliminar').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const id = e.currentTarget.dataset.id;
+                    const nombre = e.currentTarget.closest('tr').children[1].textContent; // Busco el nombre del producto para mostrarlo en el mensaje.
+                    
+                    // 'confirm()' saca la ventanita nativa del navegador que pregunta "Aceptar" o "Cancelar".
+                    if (confirm(`¿Estás seguro de que deseas eliminar el producto "${nombre}"?`)) {
+                        // Si el usuario aprieta "Aceptar", le mando un mensaje al servidor pidiéndole que borre el producto.
+                        socket.emit('eliminar_producto', { id: id });
+                    }
+                });
+            });
+        };
+
+        // Le asigno la lógica al botón principal de "Agregar Nuevo Producto".
+        btnAbrirModalCrear.addEventListener('click', () => {
+            modalTitulo.textContent = 'Añadir Nuevo Producto';
+            form.reset(); // Limpio el formulario por si tenía datos de una edición anterior.
+            productoIdInput.value = ''; // Vacío el campo del ID para que el servidor sepa que es una CREACIÓN.
+            abrirModal();
+        });
+        
+        // Lógica para los botones de cancelar y cerrar el modal.
+        btnCancelar.addEventListener('click', cerrarModal);
+        btnCerrarModal.addEventListener('click', cerrarModal);
+        
+        // Controlo el envío del formulario.
+        form.addEventListener('submit', (e) => {
+            e.preventDefault(); // Evito la recarga de la página.
+            const formData = new FormData(form); // Agarro todos los datos del formulario.
+            const data = Object.fromEntries(formData.entries()); // Los convierto a un objeto simple.
+            // Le mando este objeto al servidor a través del evento 'guardar_producto'.
+            socket.emit('guardar_producto', data);
+        });
+        
+        // Creo una función para no repetir el código HTML de una fila.
+        const crearFilaHTML = (producto) => `
+            <td>${producto.id}</td><td>${producto.nombre}</td><td>${producto.sku}</td>
+            <td>${producto.cantidad}</td>
+            <td>
+                <div class="acciones-menu">
+                    <details role="list" dir="rtl"><summary aria-haspopup="listbox" role="button">...</summary>
+                    <ul role="listbox">
+                        <li><a href="#" class="link-editar" data-id="${producto.id}" data-nombre="${producto.nombre}" data-sku="${producto.sku}" data-cantidad="${producto.cantidad}">Editar</a></li>
+                        <li><a href="#" class="link-eliminar" data-id="${producto.id}">Eliminar</a></li>
+                    </ul></details>
+                </div>
+            </td>`;
+
+        // -- Aquí escucho las respuestas que me manda el servidor en tiempo real --
+
+        // Cuando el servidor me avisa que se creó un producto...
+        socket.on('producto_creado', (producto) => {
+            const nuevaFila = document.createElement('tr'); // Creo una fila nueva.
+            nuevaFila.id = `producto-${producto.id}`; // Le pongo su ID.
+            nuevaFila.innerHTML = crearFilaHTML(producto); // Le meto el contenido HTML.
+            tablaBody.appendChild(nuevaFila); // Agrego la fila al final de la tabla.
+            asignarEventos(); // Vuelvo a activar los eventos para que los nuevos botones de la fila funcionen.
+            cerrarModal();
+        });
+
+        // Cuando el servidor me avisa que se modificó un producto...
+        socket.on('producto_modificado', (producto) => {
+            const fila = document.getElementById(`producto-${producto.id}`); // Busco la fila por su ID.
+            if (fila) {
+                fila.innerHTML = crearFilaHTML(producto); // Reemplazo su contenido con los datos nuevos.
+                asignarEventos();
+            }
+            cerrarModal();
+        });
+
+        // Cuando el servidor me avisa que se eliminó un producto...
+        socket.on('producto_eliminado', (data) => {
+            const fila = document.getElementById(`producto-${data.id}`);
+            if (fila) {
+                fila.remove(); // ¡Borro la fila de la página!
+            }
+        });
+
+        // Lógica para el buscador. Se activa cada vez que escribo o borro una letra.
+        buscador.addEventListener('input', (e) => {
+            const textoBusqueda = e.target.value.toLowerCase(); // Convierto a minúsculas para que no distinga.
+            tablaBody.querySelectorAll('tr').forEach(fila => {
+                const nombre = fila.children[1].textContent.toLowerCase();
+                const sku = fila.children[2].textContent.toLowerCase();
+                // Si el nombre o el SKU contienen el texto que estoy buscando...
+                fila.style.display = (nombre.includes(textoBusqueda) || sku.includes(textoBusqueda)) ? '' : 'none'; // La muestro o la oculto.
+            });
+        });
+        
+        // Llamo a esta función una vez al principio para que los botones que cargaron con la página funcionen.
+        asignarEventos();
+    });
+    </script>
+</body>
+</html>
