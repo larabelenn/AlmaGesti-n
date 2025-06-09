@@ -1,4 +1,4 @@
-# 📦 Sistema Integral de Gestión de Almacén (SIGA)
+# 📦 Sistema Integral de Gestión de Almacén (AlmaGestion)
 
 Un sistema web **full-stack** diseñado para optimizar la gestión de inventario de un almacén. Permite llevar un control preciso del stock, administrar el catálogo de productos y visualizar datos clave del negocio a través de un **dashboard interactivo**.
 
